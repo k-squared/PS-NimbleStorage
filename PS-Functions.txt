@@ -1,0 +1,100 @@
+function Set-NimbleIopsRR {
+
+<#
+.SYNOPSIS
+    This function will set the recommended IO path switching values on all Nimble datastore disks attached to a VMware ESXi host that already use PSP_RR
+.DESCRIPTION
+    This function will use the PowerCLI (required) toolkit to establish a connection to an ESXi host (FQDN) and then set
+    the following best practice values on all Nimble disks:
+    2) It will use esxcli to manually change the round robin nmp to use the policy of "iops" and set that value to "1"
+.PARAMETER VMHost
+    Specifies the FQDN of an ESX host as defined in vCenter.  You can also pipe this value parameter.
+.EXAMPLE
+    Set-NimbleIopsPSP -VMHost 'host-r720-esx01.company.com'
+.EXAMPLE
+    'host-r720-esx01.company.com' | Set-NimbleIopsRR
+#>
+
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+    param(
+    [Parameter(Mandatory=$true, ValueFromPipeline=$true, Position=0, HelpMessage="The FQDN of the ESXi host(s)")]
+    [string[]]$VMHost)
+
+    process {
+        Write-Verbose "Please enter in the root credentials for the ESXi host(s)"
+        $root = Get-Credential
+        
+        Connect-VIServer $VMHost -Credential $root
+        $esxcli = Get-EsxCli -VMHost $VMHost
+
+        foreach ($lun in Get-ScsiLun -VMHost $VMHost | Where-Object {$_.Vendor -eq "Nimble" }) { 
+            Write-Verbose "Setting RR_PSP to use type=iops and iops=1"
+            $esxcli.storage.nmp.psp.roundrobin.deviceconfig.set($null, $null, $lun.CanonicalName, 1, "iops", $null) | Out-Null
+            $esxcli.storage.nmp.psp.roundrobin.deviceconfig.get($lun.CanonicalName) | Out-Null
+        }
+
+        Write-Verbose "Finished changes - please validate information above"
+
+        Disconnect-VIServer -Server $VMHost -confirm:$false
+    }
+}
+
+
+function Set-NimblePSP {
+
+<#
+.SYNOPSIS
+    This function will set the recommended IO and multi-pathing values on all Nimble datastore disks attached to a VMware ESXi host
+.DESCRIPTION
+    This function will use the PowerCLI (required) toolkit to establish a connection to an ESXi host (FQDN) and then set
+    the following best practice values on all Nimble disks:
+    1) It will first check if the default Nimble PSP of "Round Robin" has been set and if not, set it at the ESXi host level
+    2) It will next step through and change the MPIO setting for all Nimble disks to use "Round Robin"
+    3) It will finally make use of the hosts esxcli to change the round robin nmp to use the policy of "iops" and set that value to "1"
+.PARAMETER VMHost
+    Specifies the FQDN of an ESXi host as defined in vCenter.  You can also pipe this value parameter.
+.EXAMPLE
+    Set-NimblePSP -VMHost 'test-r720-esx01.company.com'
+.EXAMPLE
+    'test-r720-esx01.company.com' | Set-NimblePSP
+.NOTES
+    Works by default on ESXi 5.1+, edit esxcli command below in script to work on ESXi 5.0
+#>
+
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+    param(
+    [Parameter(Mandatory=$true, ValueFromPipeline=$true, Position=0, HelpMessage="The FQDN of the ESXi host(s)")]
+    [string[]]$VMHost)
+
+    process {
+        Write-Verbose "Please enter in the root credentials for the ESXi host"
+        $root = Get-Credential
+        
+        Connect-VIServer $VMHost -Credential $root
+        $esxcli = Get-EsxCli -VMHost $VMHost
+
+        Write-Verbose "Checking and setting MPIO settings on $VMHost"
+    
+        try {
+            if ($esxcli.storage.nmp.satp.rule.add($null, $null, $null, $null, $null, $null, $null, $null, "VMW_PSP_RR", $null, "VMW_SATP_ALUA", $null, $null, "Nimble") -eq $true) 
+            { Write-Verbose "Added rule for Nimble volumes to use RoundRobin PSP" }
+        }
+        catch {
+            Write-Verbose "Rule for Nimble volumes to use RoundRobin PSP is already in place"
+        }
+
+        foreach ($lun in Get-ScsiLun -VMHost $VMHost | Where-Object {$_.Vendor -eq "Nimble" }) { 
+            Write-Verbose "Applying MPIO settings for volume $lun"
+            # $esxcli.storage.nmp.device.set($false, $lun.CanonicalName, "VMW_PSP_RR") | Out-Null
+            Set-ScsiLun -ScsiLun $lun -MultipathPolicy RoundRobin | Out-Null
+            Write-Verbose "Setting RR_PSP to use type=iops and iops=1"
+            $esxcli.storage.nmp.psp.roundrobin.deviceconfig.set($null, $null, $lun.CanonicalName, 1, "iops", $null) | Out-Null
+            # For ESXi 5.0: $esxcli.storage.nmp.psp.roundrobin.deviceconfig.set($null, $lun.CanonicalName, 1, "iops", $null) | Out-Null
+            $esxcli.storage.nmp.psp.roundrobin.deviceconfig.get($lun.CanonicalName) | Out-Null
+        }
+
+        Write-Verbose "Finished changes - please validate information above"
+
+        Disconnect-VIServer -Server $VMHost -confirm:$false
+    }
+}
